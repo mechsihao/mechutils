@@ -1,0 +1,46 @@
+#!/bin/bash
+
+alias ll="ls -lF"
+alias lla="ls -alF"
+alias see='watch -n 2'
+alias gpu="watch -n 0.1 nvidia-smi"
+alias hls='hdfs dfs -ls'
+alias hlsr='hdfs dfs -lsr'
+alias hdus='hdfs dfs -dus'
+alias hcount='hdfs dfs -count' 
+alias hmv='hdfs dfs -mv'
+alias hcp='hdfs dfs -cp'
+alias hrm='hdfs dfs -rm'
+alias hrmr='hdfs dfs -rmr'
+alias hexpunge='hdfs dfs -expunge'
+alias hput='hdfs dfs -put'
+alias hcopyFromLocal='hdfs dfs -copyFromLocal'
+alias hmoveFromLocal='hdfs dfs -moveFromLocal'
+alias hget='hdfs dfs -get'
+alias hgetmerge='hdfs dfs -getmerge'
+alias hcat='hdfs dfs -cat'
+alias htext='hdfs dfs -text'
+alias hcopyToLocal='hdfs dfs -copyToLocal'
+alias hmoveToLocal='hdfs dfs -moveToLocal'
+alias hmkdir='hdfs dfs -mkdir'
+alias hsetrep='hdfs dfs -setrep'
+alias htouchz='hdfs dfs -touchz'
+alias htest='hdfs dfs -test'
+alias hstat='hdfs dfs -stat'
+alias htail='hdfs dfs -tail'
+alias hchmod='hdfs dfs -chmod'
+alias hchown='hdfs dfs -chown'
+alias hchgrp='hdfs dfs -chgrp'
+alias hhelp='hdfs dfs -help'
+alias gpu_used="fuser -v /dev/nvidia*"
+
+alias download_utils='git clone http://gitlab.alibaba-inc.com/mech.lsh/utils.git'
+
+
+hdu(){
+    if [[ $# == 2 ]] && [[ $1 == '-i' ]]; then
+        hdfs dfs -ls "$2" 2>/dev/null | awk '/^-/ {sum+=$5;count+=1} END {print "总数量: " count " 个, 总大小: " sum " B, " sum/1024 " KB, " sum/1024/1024 " MB, " sum/1024/1024/1024 " GB"}'
+    else
+        hdfs dfs -du $@
+    fi
+}
