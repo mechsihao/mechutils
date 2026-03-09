@@ -1,5 +1,28 @@
+# -*- coding:utf-8 -*-
 import os
 import datetime
+
+
+config1 = {
+    "id": "", 
+    "key": "",
+    "host": ""
+}
+
+
+auth_map = {
+    "mechlsh": config1
+}
+
+
+def get_auth_str(oss_path):
+    assert oss_path.startswith("oss://"), "[ERROR] Input path is not prefix of `oss://`, got {}".format(oss_path)
+    bucket = oss_path[len("oss://"):].split("/")[0]
+    if bucket in auth_map:
+        auth_str = "--id {id} --key {key} --host='{host}'".format(**auth_map[bucket])
+        return auth_str
+    else:
+        raise Exception("[ERROR] {} dost not find in conifg, please config it!".format(bucket))
 
 
 def today(fmt="%Y%m%d.%H%M"):
@@ -86,35 +109,45 @@ def glob_oss(file_pattern):
         - ?:任意一个字符
         - 注意，只能同时出现一种通配符，不允许混用！
     """
+    AUTH_STRING = get_auth_str(file_pattern)
     stack = [i for i in ["*", "%d", "?"] if i in file_pattern]
     assert len(stack) == 1 or len(stack) == 0, "[ERROR] Do not support mutlt wildcard!, find %s" % stack
     assert any([i not in file_pattern for i in ["/*", "/%d", "/?"]]), "[ERROR] Do not support `.../*...`, `.../?...` or `.../%d...`, because oss system must have prefix!"
     if len(stack) == 0:
-        res = [line.strip().split(" ")[-1] for line in os.popen("osscmd listallobject %s" % file_pattern).read().split("\n") if "oss://" in line and line.strip()]
+        res = [line.strip().split(" ")[-1] for line in os.popen("osscmd listallobject '%s' %s" % (file_pattern, AUTH_STRING)).read().split("\n") if "oss://" in line and line.strip()]
         res = [i for i in res if i == file_pattern]
     else:
-        prefix = file_pattern.split(stack[0])[0]
-        suffixes = file_pattern.split(stack[0])[1:]
+        tag = stack[0]
+        prefix = file_pattern.split(tag)[0]
+        file_root = os.path.dirname(prefix)
+        suffixes = file_pattern.split(tag)[1:]
         
-        msg = os.popen("osscmd listallobject %s" % prefix).read()
-        if "Error Status:\n\n404" in msg:
-            raise FileNotFoundError("[ERROR] File dose not exist! oss prefix: %s, detail: %s" % (prefix, msg))
+        # msg = os.popen("osscmd listallobject '%s' %s" % (prefix, AUTH_STRING)).read()
+        msg = os.popen("osscmd ls '%s' %s" % (prefix, AUTH_STRING)).read()
+        if "Error Status:\n\n404" in msg or 'The specified bucket does not exist' in msg:
+            raise FileNotFoundError(
+                "[ERROR] Bucket dose not exist! oss prefix: %s, detail: %s"
+                % (prefix, msg)
+            )
         elif msg.startswith("object list number is: 0"):
             print("[WARNING] Prefix match noting! pattern: %s" % (prefix))
             return []
         else:
-            res = list(
-                    filter(
-                        lambda x: x.startswith("oss://"), 
-                        map(
-                            lambda x: x[3], 
-                            filter(
-                                lambda x: len(x) == 5, 
-                                map(lambda x: x.split(" "), msg.split("\n"))
-                            )
-                        )
-                    )
-                )
+            res = [i.split()[-2] for i in msg.strip().split("\n") if 'oss://' in i and i.split()[-2].startswith(file_root + "/")]
+            res = [i for i in res if i not in [prefix, prefix+"/"]]
+            # res = list(
+            #     filter(
+            #         lambda x: x.startswith("oss://") and x.startswith(file_root + "/"),
+            #         map(
+            #             lambda x: x[3],
+            #             filter(
+            #                 lambda x: len(x) == 5,
+            #                 map(lambda x: x.split(" "), msg.split("\n")),
+            #             ),
+            #         ),
+            #     )
+            # )
+
             res = __filter_star_mark(res, file_pattern)
             res = __filter_digitial_mark(res, file_pattern)
             res = __filter_question_mark(res, file_pattern)
@@ -126,10 +159,11 @@ def glob_oss(file_pattern):
 
 
 def get_file_meta_info(file):
+    AUTH_STRING = get_auth_str(file)
     try:
-        msg = os.popen("osscmd meta %s" % file).read()
+        msg = os.popen("osscmd meta '%s' %s" % (file, AUTH_STRING)).read()
         if msg.startswith("Error Headers"):
-            raise FileNotFoundError(f"not found")
+            raise FileNotFoundError("File does not exist")
         msg_arr = [i for i in msg.split("\n") if i.strip()]
         return {k.strip(): v.strip() for k, v in map(lambda x: x.split(": "), msg_arr) if k.strip() and v.strip()}
     except Exception as e:
@@ -148,7 +182,7 @@ def save_local_etag(etag, file):
 
 def read_local_etag(file):
     etag_file = os.path.join(os.path.dirname(file), "." + os.path.basename(file)) + ".etag"
-    return [line for line in open(etag_file) if line][0] if os.path.exists(etag_file) else ""
+    return [line for line in open(etag_file) if line][0] if os.path.exists(etag_file) else None
 
 
 def get_file_etag(x):
@@ -172,72 +206,120 @@ def get_file_size_local(x):
     return float(res) / 1024 / 1024
     
 
-def download_file_single(oss_file, local_file):
-    loacl_dir = os.path.dirname(local_file)
-    if os.path.exists(loacl_dir):
-        if os.system("osscmd get %s %s" % (oss_file, local_file)):
+def download_file_single(oss_file, local_file, be_quiet=False):
+    AUTH_STRING = get_auth_str(oss_file)
+    local_dir = os.path.dirname(local_file)
+    cmd = "osscmd get '%s' '%s' %s" % (oss_file, local_file, AUTH_STRING)
+    if be_quiet:
+        cmd += " > /dev/null"
+    if os.path.exists(local_dir):
+        if os.system(cmd):
             raise Exception("[ERROR] Download failed! oss path: %s" % oss_file)
         else:
-            print("[INFO] <%s> Download success! local path: %s\n" % (now(), local_file), end="")
+            print("[INFO] <%s> Download success! local path: %s" % (now(), local_file))
     else:
-        raise Exception("[ERROR] Local dir not found: %s" % loacl_dir)
+        raise Exception("[ERROR] Local dir not found: %s" % local_dir)
 
 
-def download_file_multi(oss_file, local_file, thread=5):
+def download_file_multi(oss_file, local_file, thread=5, be_quiet=False):
     """文件过大则使用这个下载
     """
-    loacl_dir = os.path.dirname(local_file)
-    if os.path.exists(loacl_dir):
-        if os.system("osscmd multiget %s %s --thread_num=%s" % (oss_file, local_file, thread)):
+    AUTH_STRING = get_auth_str(oss_file)
+    local_dir = os.path.dirname(local_file)
+    cmd = "osscmd multiget '%s' '%s' --thread_num=%s %s" % (oss_file, local_file, thread, AUTH_STRING)
+    if be_quiet:
+        cmd += " > /dev/null"
+    if os.path.exists(local_dir):
+        if os.system(cmd):
             raise Exception("[ERROR] Download failed! oss path: %s" % oss_file)
         else:
-            print("[INFO] <%s> Download success! local path: %s\n" % (now(), local_file), end="")
+            print("[INFO] <%s> Download success! local path: %s" % (now(), local_file))
     else:
-        raise Exception("[ERROR] Local dir not found: %s" % loacl_dir)
+        raise Exception("[ERROR] Local dir not found: %s" % local_dir)
 
 
-def download_file(oss_file, local_file, thr=2, read_cache=True):
+def download_file(oss_file, local_file, thr=2, read_cache=True, ignore_error=False, be_quiet=False, multi_download_thread_num=5):
     """
     下载总入口，会同时保存etag，对比etag不一致才会下载
     Args:
         :param thr: 分片下载阈值，单位GB
     """
-    meta_info = get_file_meta_info(oss_file)
-    oss_etag = get_file_etag(meta_info)
-    local_etag = read_local_etag(local_file)
-    if read_cache and oss_etag == local_etag:
-        print("[INFO] <%s> Remote oss file '%s' dose not change, do not download\n" % (now(), oss_file), end="")
-        return oss_etag, 0
-    else:
-        download_file_multi(oss_file, local_file) if get_file_size(meta_info) > thr else download_file_single(oss_file, local_file)
-        save_local_etag(oss_etag, local_file)
-        return oss_etag, 1
+    try:
+        meta_info = get_file_meta_info(oss_file)
+        oss_etag = get_file_etag(meta_info)
+        local_etag = read_local_etag(local_file)
+        if read_cache and os.path.exists(local_file) and oss_etag == local_etag:
+            print("[INFO] <%s> Remote oss file '%s' dose not change, do not download." % (now(), oss_file))
+            return oss_etag, 0
+        else:
+            if get_file_size(meta_info) > thr:
+                download_file_multi(oss_file, local_file, multi_download_thread_num, be_quiet)
+            else:
+                download_file_single(oss_file, local_file, be_quiet)
+            save_local_etag(oss_etag, local_file)
+            return oss_etag, 1
+    except Exception as e:
+        if ignore_error:
+            print(e)
+        else:
+            raise Exception(e)
 
 
-def upload_file_single(local_file, oss_file):
-    if os.system("osscmd put %s %s" % (local_file, oss_file)):
+def upload_file_single(local_file, oss_file, be_quiet=False):
+    AUTH_STRING = get_auth_str(oss_file)
+    cmd = "osscmd put '%s' '%s' %s" % (local_file, oss_file, AUTH_STRING)
+    if be_quiet:
+        cmd += " > /dev/null"
+    if os.system(cmd):
         raise Exception("[ERROR] Upload failed! local path: %s" % local_file)
     else:
-        print("[INFO] <%s> Upload success! oss path: %s\n" % (now(), oss_file), end="")
+        print("[INFO] <%s> Upload success! oss path: %s" % (now(), oss_file))
 
 
-def upload_file_multi(local_file, oss_file, thread=5):
+def upload_file_multi(local_file, oss_file, thread=5, be_quiet=False):
     """文件过大则使用这个上传
     """
-    if os.system("osscmd multiupload %s %s --thread_num=%s" % (local_file, oss_file, thread)):
+    AUTH_STRING = get_auth_str(oss_file)
+    cmd = "osscmd multiupload '%s' '%s' --thread_num=%s %s" % (local_file, oss_file, thread, AUTH_STRING)
+    if be_quiet:
+        cmd += " > /dev/null"
+    if os.system(cmd):
         raise Exception("[ERROR] Upload failed! local path: %s" % local_file)
     else:
-        print("[INFO] <%s> Upload success! oss path: %s\n" % (now(), oss_file), end="")
+        print("[INFO] <%s> Upload success! oss path: %s" % (now(), oss_file))
 
 
-def upload_file(local_file, oss_file, thr=2):
+def upload_file(local_file, oss_file, thr=5, be_quiet=False):
     """上传文件总入口
     """
-    upload_file_multi(local_file, oss_file) if get_file_size_local(local_file) > thr else upload_file_single(local_file, oss_file)
+    upload_file_multi(local_file, oss_file, thread=5, be_quiet=be_quiet) if get_file_size_local(local_file) > thr else upload_file_single(local_file, oss_file, be_quiet)
 
 
-def config_oss(access_id, access_key, host="oss-cn-hangzhou-zmf.aliyuncs.com"):
-    if os.system("osscmd config --id=%s --key=%s --host=%s" % (access_id, access_key, host)):
-        raise Exception("[ERROR] <%s> Config oss failed! access_id=%s, access_key=%s, host= %s" % (access_id, access_key, host))
+def upload_dir(local_dir, oss_dir, be_quiet=False):
+    """上传文件总入口
+    """
+    AUTH_STRING = get_auth_str(oss_dir)
+    cmd = "osscmd uploadfromdir '%s' '%s' %s" % (local_dir, oss_dir, AUTH_STRING)
+    if be_quiet:
+        cmd += " > /dev/null"
+    if os.system(cmd):
+        raise Exception("[ERROR] Upload dir failed! local dir: %s" % local_dir)
     else:
-        print("[INFO] <%s> Config oss success!" % now())
+        print("[INFO] <%s> Upload dir success! oss dir: %s" % (now(), oss_dir))
+
+
+def copy_oss(oss_path1, oss_path2):
+    """复制文件总入口
+    """
+    if oss_path1.endswith("/") and oss_path2.endswith("/"):
+        opt = "copybucket"
+    elif not oss_path1.endswith("/") and not oss_path2.endswith("/"):
+        opt = "copy"
+    else:
+        raise Exception("[ERROR] Copy source file and target file must be same type.")
+
+    AUTH_STRING = get_auth_str(oss_path1)
+    if os.system("osscmd %s '%s' '%s' %s" % (opt, oss_path1, oss_path2, AUTH_STRING)):
+        raise Exception("[ERROR] Copy file/dir failed! %s -> %s" % (oss_path1, oss_path2))
+    else:
+        print("[INFO] <%s> Copy file/dir success! %s -> %s" % (now(), oss_path1, oss_path2))
