@@ -1,10 +1,9 @@
 import json
 import unicodedata
 from json import JSONDecodeError
-
+import re
 import pandas as pd
 import numpy as np
-from utils import oss_util, hdfs_util
 
 
 def get_json(string, bracket = '{}'):
@@ -29,7 +28,13 @@ def get_json(string, bracket = '{}'):
                 pass
         else:
             continue
-            
+    if len(stack)==1 and stack[0] == 0:
+        # 当且仅当只有一个json串，且仅缺失左侧一个花括号，才修复
+        try:
+            contain_json.append(json.dumps(json.loads(string + bracket[1]), ensure_ascii=False))
+            stack = []
+        except:
+            pass
     return contain_json, stack
 
 
@@ -104,6 +109,10 @@ def parse_json_first(x: str):
     try:
         if len(res_list) == 0 and len(error_msg) == 0:
             return {"succ": False, "json": {}, "error_msg": "nullkey", "locate": []}
+        elif len(res_list) == 1 and len(error_msg) != 0:
+            json_str = res_list[0]
+            start_id = x.find(json_str)
+            return {"succ": True, "json": json.loads(json_str), "error_msg": "a bad json str after a good json str", "locate": [start_id, start_id + len(json_str)]}
         elif len(error_msg) != 0:
             return {"succ": False, "json": {}, "error_msg": "failed", "locate": []}
         else:
@@ -117,7 +126,7 @@ def parse_json_first(x: str):
                 tmp_json_str = sorted(res_list, key=lambda x: len(json.loads(x).keys()))[-1]
                 start_id = x.find(tmp_json_str)
                 return {"succ": True, "json": tmp_json, "error_msg": "multi", "locate": [start_id, start_id + len(tmp_json_str)]}      
-    except JSONDecodeError as e:
+    except JSONDecodeError:
         try:
             tmp_json_list = [json.loads(clean_json_str(res)) for res in res_list]
             tmp_json = sorted(tmp_json_list, key=lambda x: len(x.keys()))[-1]
@@ -134,7 +143,6 @@ def parse_json_second(x: dict, standard_keys: list):
     """第二步解析，解析成json k：v，k为我们要求的key，假如有key没有对上，则用编辑最小距离替代
     """
     err_msg = []
-    gpt_res_keys = list(x.keys())
     
     new_res = {}
     for k, v in x.items():
@@ -142,12 +150,12 @@ def parse_json_second(x: dict, standard_keys: list):
         new_res[most_likly_keys] = v
         
         if most_likly_keys != k:
-            err_msg.append(f"key错误, key='{k}', most_likly_keys='{most_likly_keys}'")
+            err_msg.append("key错误, key='{}', most_likly_keys='{}'".format(k, most_likly_keys))
     
     for k in standard_keys:
         if k not in new_res:
             new_res[k] = 0
-            err_msg.append(f"key缺失, key='{k}'")
+            err_msg.append("key缺失, key='{}'".format(k))
     
     return new_res, ";".join(err_msg)
 
@@ -157,6 +165,7 @@ def parse_response_json(x, standard_keys: list = None):
     注意事项：
         - 1.该解析方法仅能在一个response 解析出一个json字符串
         - 2.一旦传入standard_keys，则会按照最小编辑距离从standard_keys中替换key，最终输出的dict，标准的key为standard_keys
+        - 3.该接口会修复大模型输出中json括号的一些问题
 
     Arguments:
         x {[str]} -- [大模型response]
@@ -178,5 +187,54 @@ def parse_response_json(x, standard_keys: list = None):
     elif res["succ"] and standard_keys:
         repair_dict, err_msg = parse_json_second(res["json"], standard_keys)
         res["json"] = repair_dict
-        res["error_msg"] += f"\nstage2 err msg: {err_msg}"
+        res["error_msg"] += "\nstage2 err msg: {}".format(err_msg)
     return res
+
+
+def parse_mech_json(x, main_keys=None, aux_tags=None):
+    def parse_json(res, x, main_keys, aux_tags):
+        for tag in main_keys:
+            if f"<{tag}>" in x and f"</{tag}>" in x:
+                tmp_res = x[x.find(f"<{tag}>")+len(f"<{tag}>"):x.find(f"</{tag}>")].strip()
+            elif f"<{tag}>" in x:
+                tmp_res = x[x.find(f"<{tag}>")+len(f"<{tag}>"):].strip().strip("<>").strip()
+            else:
+                print(f"[ERROR] Failed parse main key, detail: not found <{tag}>...</{tag}>")
+                res[tag] = ""
+                res["status"] = "failed"
+                return res
+            res[tag] = tmp_res
+        if aux_tags:
+            for tag in aux_tags:
+                if f"<{tag}>" in x and f"</{tag}>" in x:
+                    tmp_res = x[x.find(f"<{tag}>")+len(f"<{tag}>"):x.find(f"</{tag}>")].strip()
+                else:
+                    print(f"[WARNING] Failed parse aux key, detail: not found <{tag}>...</{tag}>")
+                    tmp_res = ""
+                res[tag] = tmp_res    
+    
+    def extract_parts(s):
+        pattern_open_tag = r'<([^>]*)>'
+        open_tags = re.findall(pattern_open_tag, s)
+        pattern_close_tag = r'<\/([^\>]*)>'
+        close_tags = re.findall(pattern_close_tag, s)
+        return open_tags, close_tags
+
+    x = x.strip().strip("`").strip()
+    res = {"status": "succ"}
+    if main_keys:
+        parse_json(res, x, main_keys, aux_tags)
+    else:
+        open_tags, close_tags = extract_parts(x)
+        valid_tags = [i for i in open_tags if i in close_tags]
+        parse_json(res, x, valid_tags, None)
+    return res
+
+
+if __name__ == "__main__":
+    a = """
+    <shot>asdasdasd</shot>
+    <answer>asdasdasd</answer>
+    """
+    res = parse_mech_json(a)
+    print(res)
